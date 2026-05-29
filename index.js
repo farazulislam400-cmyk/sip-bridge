@@ -1,6 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const dgram = require('dgram');
 const crypto = require('crypto');
+const http = require('http');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -8,11 +9,49 @@ const SIP_SERVER = process.env.SIP_SERVER || '123.0.31.250';
 const SIP_PORT = parseInt(process.env.SIP_PORT) || 5060;
 const SIP_USER = process.env.SIP_USER || '09644342080';
 const SIP_PASS = process.env.SIP_PASS || 'Umm@80S';
+const PORT = process.env.PORT || 3000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 console.log('✅ SIP Bridge চালু হয়েছে...');
 
+// HTTP Server — incoming SIP notify এর জন্য
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'POST' && req.url === '/incoming') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body);
+        console.log('📲 Incoming call:', data.from);
+        
+        await supabase.from('call_queue').insert({
+          phone_number: data.from,
+          status: 'incoming',
+          direction: 'inbound'
+        });
+        
+        res.writeHead(200);
+        res.end('OK');
+      } catch(e) {
+        res.writeHead(400);
+        res.end('Error');
+      }
+    });
+  } else if (req.url === '/health') {
+    res.writeHead(200);
+    res.end('OK');
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 HTTP Server running on port ${PORT}`);
+});
+
+// Outbound call function
 function makeCall(phone, callId) {
   return new Promise((resolve) => {
     const client = dgram.createSocket('udp4');
@@ -39,13 +78,10 @@ function makeCall(phone, callId) {
     client.on('message', async (response) => {
       const res = response.toString();
       console.log(`📱 SIP Response: ${res.split('\r\n')[0]}`);
-      
-      if (res.includes('SIP/2.0 200') || res.includes('SIP/2.0 180') || res.includes('SIP/2.0 183')) {
+      if (res.includes('SIP/2.0 200') || res.includes('SIP/2.0 180')) {
         await supabase.from('call_queue').update({ status: 'calling' }).eq('id', callId);
-        console.log(`✅ Call connected: ${phone}`);
       } else if (res.includes('SIP/2.0 4') || res.includes('SIP/2.0 5')) {
         await supabase.from('call_queue').update({ status: 'failed' }).eq('id', callId);
-        console.log(`❌ Call failed: ${phone}`);
       }
       client.close();
       resolve();
@@ -75,6 +111,7 @@ function makeCall(phone, callId) {
   });
 }
 
+// Polling
 let lastChecked = new Date().toISOString();
 
 async function checkCallQueue() {
